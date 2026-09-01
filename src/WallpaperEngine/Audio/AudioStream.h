@@ -164,6 +164,14 @@ private:
      */
     int resampleAudio (uint8_t* out_buf, const int out_size);
     /**
+     * Decodes the currently queued packet while playback remains active.
+     *
+     * @return Resampled bytes, a negative value on decode error, or 0 when the packet is exhausted/paused.
+     */
+    int decodeQueuedPacket (uint8_t* audioBuffer, int bufferSize);
+    /** @return Whether decoding should continue for the current playback state. */
+    [[nodiscard]] bool shouldDecode () const;
+    /**
      * Queues a packet into the play queue
      *
      * @param pkt

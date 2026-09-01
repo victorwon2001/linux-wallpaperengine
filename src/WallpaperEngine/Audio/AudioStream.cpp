@@ -723,66 +723,77 @@ int AudioStream::resampleAudio (uint8_t* out_buf, const int out_size) {
     return resampled_data_size;
 }
 
-int AudioStream::decodeFrame (uint8_t* audioBuffer, const int bufferSize) {
-	if (this->m_decodeMutex == nullptr) {
-		return 0;
+bool AudioStream::shouldDecode () const {
+    return this->m_audioContext.getApplicationContext ().state.general.keepRunning && this->isInitialized ()
+	&& this->isPlaying ();
+}
+
+int AudioStream::decodeQueuedPacket (uint8_t* audioBuffer, const int bufferSize) {
+    while (this->m_audioPacketSize > 0 && this->shouldDecode ()) {
+	int gotFrame = 0;
+	int ret = avcodec_receive_frame (this->getContext (), this->m_decodeFrame);
+
+	if (ret == 0) {
+	    gotFrame = 1;
+	}
+	if (ret == AVERROR (EAGAIN)) {
+	    ret = 0;
+	}
+	if (ret == 0) {
+	    ret = avcodec_send_packet (this->getContext (), this->m_decodePacket);
+	}
+	if (ret < 0 && ret != AVERROR (EAGAIN)) {
+	    return -1;
 	}
 
-	SDL_LockMutex (this->m_decodeMutex);
-	WallpaperEngine::Data::Utils::ScopeGuard decodeGuard ([this] { SDL_UnlockMutex (this->m_decodeMutex); });
+	if (this->m_decodePacket->size < 0) {
+	    // if error, skip frame
+	    this->m_audioPacketSize = 0;
+	    break;
+	}
+
+	this->m_audioPacketSize -= this->m_decodePacket->size;
+	if (gotFrame == 0) {
+	    continue;
+	}
+
+	const int dataSize = this->resampleAudio (audioBuffer, bufferSize);
+	if (dataSize > 0) {
+	    return dataSize;
+	}
+    }
+
+    return 0;
+}
+
+int AudioStream::decodeFrame (uint8_t* audioBuffer, const int bufferSize) {
+    if (this->m_decodeMutex == nullptr) {
+	return 0;
+    }
+
+    SDL_LockMutex (this->m_decodeMutex);
+    WallpaperEngine::Data::Utils::ScopeGuard decodeGuard ([this] { SDL_UnlockMutex (this->m_decodeMutex); });
 
     // block until there's any data in the buffers
-	while (this->m_audioContext.getApplicationContext ().state.general.keepRunning && this->isInitialized ()
-	       && this->isPlaying ()) {
-		while (this->m_audioPacketSize > 0 && this->m_audioContext.getApplicationContext ().state.general.keepRunning
-		       && this->isInitialized () && this->isPlaying ()) {
-	    int got_frame = 0;
-	    int ret = avcodec_receive_frame (this->getContext (), this->m_decodeFrame);
-
-	    if (ret == 0) {
-		got_frame = 1;
-	    }
-	    if (ret == AVERROR (EAGAIN)) {
-		ret = 0;
-	    }
-	    if (ret == 0) {
-		ret = avcodec_send_packet (this->getContext (), this->m_decodePacket);
-	    }
-	    if (ret < 0 && ret != AVERROR (EAGAIN)) {
-		return -1;
-	    }
-
-	    if (this->m_decodePacket->size < 0) {
-		// if error, skip frame
-			this->m_audioPacketSize = 0;
-			break;
-		    }
-
-		    this->m_audioPacketSize -= this->m_decodePacket->size;
-	    int data_size = 0;
-
-	    if (got_frame) {
-		// audio resampling
-		data_size = this->resampleAudio (audioBuffer, bufferSize);
-	    }
-	    if (data_size <= 0) {
-		// no data found, keep waiting
-		continue;
-	    }
-	    // some data was found
-	    return data_size;
+    while (this->shouldDecode ()) {
+	const int dataSize = this->decodeQueuedPacket (audioBuffer, bufferSize);
+	if (dataSize != 0) {
+	    return dataSize;
+	}
+	if (!this->shouldDecode ()) {
+	    return 0;
 	}
 
 	if (this->m_decodePacket->data) {
 	    av_packet_unref (this->m_decodePacket);
 	}
 
-		if (!this->dequeuePacket ()) {
-		    return 0;
-		}
+	if (!this->dequeuePacket ()) {
+	    return 0;
+	}
 
-		this->m_audioPacketSize = this->m_decodePacket->size;
-	    }
+	this->m_audioPacketSize = this->m_decodePacket->size;
+    }
 
     return 0;
 }
